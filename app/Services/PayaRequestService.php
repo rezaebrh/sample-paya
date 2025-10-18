@@ -17,7 +17,9 @@ class PayaRequestService
         return DB::transaction(function () use ($data) {
 
             $data->validate();
-            $account = $this->findAccountBySheba($data->fromShebaNumber);
+            $account = Account::where('sheba_number', $data->fromShebaNumber)
+                ->lockForUpdate()
+                ->first();
             if (!$account) {
                 throw new \Exception('Invalid source Sheba number', 400);
             }
@@ -63,7 +65,16 @@ class PayaRequestService
             if ($status === 'canceled') {
                 $this->refundPayaRequest($payaRequest);
             } elseif ($status === 'confirmed') {
-                $toAccount = $this->findAccountBySheba($payaRequest->to_sheba_number);
+                $fromAccount = Account::where('id', $payaRequest->from_account_id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+                $toAccount = Account::where('sheba_number', $payaRequest->to_sheba_number)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+                if ($fromAccount->reserved < $payaRequest->price) {
+                    throw new \Exception('Data inconsistency', 400);
+                }
+                $fromAccount->reserved -= $payaRequest->price;
                 if ($toAccount) {
                     $toAccount->balance += $payaRequest->price;
                     $toAccount->save();
@@ -80,12 +91,14 @@ class PayaRequestService
             }
 
             return $payaRequest;
-        });
+        }, 5);
     }
 
     private function refundPayaRequest(PayaRequest $payaRequest) : void
     {
-        $account = $payaRequest->account;
+        $account = Account::where('id', $payaRequest->from_account_id)
+            ->lockForUpdate()
+            ->firstOrFail();
         $account->reserved -= $payaRequest->price;
         $account->balance += $payaRequest->price;
         $account->save();
